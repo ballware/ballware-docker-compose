@@ -1,0 +1,448 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: pg17-multi
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: ${DB_ADMIN_PASSWORD:-ChangeMe2025!}
+      POSTGRES_DB: postgres
+
+      KEYCLOAK_DB_PASSWORD: ${DB_KEYCLOAK_PASSWORD:-ChangeMe2025!}
+      QUARTZ_DB_PASSWORD: ${DB_QUARTZ_PASSWORD:-ChangeMe2025!}
+      STORAGE_DB_PASSWORD: ${DB_STORAGE_PASSWORD:-ChangeMe2025!}
+      META_DB_PASSWORD: ${DB_META_PASSWORD:-ChangeMe2025!}
+      TENANT_DB_PASSWORD: ${DB_TENANT_PASSWORD:-ChangeMe2025!}
+      ML_DB_PASSWORD: ${DB_ML_PASSWORD:-ChangeMe2025!}
+      REPORTING_DB_PASSWORD: ${DB_REPORTING_PASSWORD:-ChangeMe2025!}
+
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin@ballware.local}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-ChangeMe2025!}
+    command: server /data --console-address ":9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://minio:9000/minio/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_INIT_BUCKETS: "ballware-storage"
+      MINIO_INIT_VERSIONING: "off"
+    entrypoint: >
+      /bin/sh -c '
+        set -eu
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        for b in $(echo "$$MINIO_INIT_BUCKETS" | tr "," " "); do
+          [ -z "$$b" ] && continue
+          mc mb --ignore-existing local/"$$b"
+          if [ "$${MINIO_INIT_VERSIONING:-off}" = "on" ]; then
+            mc version enable local/"$$b" || true
+          fi
+        done
+        echo "Buckets initialized."
+      '
+    restart: "no"      
+
+  mailpit:
+    image: axllent/mailpit
+    container_name: mailpit
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+  preseed-keycloak:
+    image: alpine:3.20
+    command: [ "sh", "/usr/local/bin/preseed.sh" ]
+    environment:
+      KEYCLOAK_ADMIN_USER: ${KEYCLOAK_ADMIN_USER:-admin@ballware.local}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-ChangeMe2025!}
+      STORAGE_CLIENT_SECRET: ${STORAGE_CLIENT_SECRET:-ChangeMe2025!}
+      META_CLIENT_SECRET: ${META_CLIENT_SECRET:-ChangeMe2025!}
+      ML_CLIENT_SECRET: ${ML_CLIENT_SECRET:-ChangeMe2025!}
+      GENERIC_CLIENT_SECRET: ${GENERIC_CLIENT_SECRET:-ChangeMe2025!}
+      REPORTING_CLIENT_SECRET: ${REPORTING_CLIENT_SECRET:-ChangeMe2025!}
+      CERT_CN: "localhost"
+      CERT_DAYS: "365"
+      CERT_SAN_DNS: "localhost"
+      CERT_SAN_IP: "127.0.0.1"
+      MAKE_PKCS12: "false"
+      KEYSTORE_PASSWORD: "changeit"
+      PKCS12_NAME: "keycloak"
+      PKCS12_FILE: "keystore.p12"
+    volumes:
+      - ./realms:/templates:ro
+      - realm-import:/out
+      - keycloak-certs:/certs-out
+      - ./scripts/preseed-keycloak.sh:/usr/local/bin/preseed.sh:ro
+    restart: "no"
+
+  keycloak:
+    build:
+      context: "https://github.com/ballware/ballware-keycloak.git#main:."
+      dockerfile: Dockerfile
+    container_name: keycloak
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      preseed-keycloak:
+        condition: service_completed_successfully
+    ports:
+      - "3001:8080"
+      - "3002:8443"
+    command: [
+      "start",  
+      "--optimized",
+      "--hostname-strict=false", 
+      "--hostname-strict-https=false", 
+      "--log-level=INFO", 
+      "--http-enabled=true",
+      "--https-port=8443",
+      "--http-port=8080",
+      "--hostname-url=https://localhost:3002",
+      "--import-realm"]
+    volumes:
+      - realm-import:/opt/keycloak/data/import:ro
+      - keycloak-certs:/opt/keycloak/certs:ro
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN_USER:-admin@ballware.local}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-ChangeMe2025!}
+      KC_DB: postgres
+      KC_DB_URL_HOST: postgres
+      KC_DB_URL_PORT: 5432
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${DB_KEYCLOAK_PASSWORD:-ChangeMe2025!}
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      KC_PROXY: "none"
+      KC_HOSTNAME_ADMIN_URL: "https://localhost:3002"
+      KC_HTTPS_CERTIFICATE_FILE: "/opt/keycloak/certs/tls.crt"
+      KC_HTTPS_CERTIFICATE_KEY_FILE: "/opt/keycloak/certs/tls.key"      
+      QUARKUS_HTTP_LIMITS_MAX_HEADER_SIZE: "65536"
+      QUARKUS_HTTP_LIMITS_MAX_INITIAL_LINE_LENGTH: "65536"
+      QUARKUS_HTTP_HTTP2: "false"
+  storage:
+    build:
+      context: "https://github.com/ballware/ballware-storage-service.git#main:./src"
+      dockerfile: Ballware.Storage.Service/Dockerfile
+      args:
+        - "GITHUB_USERNAME=${GITHUB_USERNAME}"
+        - "GITHUB_PAT=${GITHUB_PAT}"
+    container_name: storage-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    ports:
+      - "5005:5005"
+    environment:      
+      Kestrel__Endpoints__Http__Url: "http://+:5005"
+      Swagger__EnableClient: true
+      Swagger__ClientId: "ballwareweb"
+      Cors__AllowedOrigins: "*"
+      Cors__AllowedMethods: "*"
+      Cors__AllowedHeaders: "*"
+      Quartz__quartz.scheduler.instanceName: "ballware-local-storage"
+      Quartz__quartz.jobStore.dataSource: "ballware"
+      Quartz__quartz.dataSource.ballware.provider: "Npgsql"
+      Quartz__quartz.dataSource.ballware.connectionStringName: "QuartzConnection"
+      Authorization__Authority: "http://keycloak:8080/realms/ballware"
+      Authorization__Audience: "metaApi"
+      Authorization__RequiredScopes: "openid storageApi"
+      Authorization__RequireHttpsMetadata: "false"
+      Meta__Provider: "postgres"
+      Meta__AutoMigrations: true
+      Storage__Provider: "minio"
+      MinioStorage__Endpoint: "minio:9000"
+      MinioStorage__AccessKey: "${MINIO_ROOT_USER}"
+      MinioStorage__SecretKey: "${MINIO_ROOT_PASSWORD}"
+      MinioStorage__UseSSL: false
+      MinioStorage__BucketName: "ballware-storage"
+      ConnectionStrings__MetaStorageConnection: "Host=postgres;Port=5432;Database=storage;Username=storage;Password=${DB_STORAGE_PASSWORD:-ChangeMe2025!}"
+      ConnectionStrings__QuartzConnection: "Host=postgres;Port=5432;Database=quartz;Username=quartz;Password=${DB_QUARTZ_PASSWORD:-ChangeMe2025!}"
+
+  meta:
+    build:
+      context: "https://github.com/ballware/ballware-meta-service.git#main:./src"
+      dockerfile: Ballware.Meta.Service/Dockerfile
+      args:
+        - "GITHUB_USERNAME=${GITHUB_USERNAME}"
+        - "GITHUB_PAT=${GITHUB_PAT}"
+    container_name: meta-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5001:5001"
+    environment:
+      Kestrel__Endpoints__Http__Url: "http://+:5001"
+      Swagger__EnableClient: true
+      Swagger__ClientId: "ballwareweb"
+      Cors__AllowedOrigins: "*"
+      Cors__AllowedMethods: "*"
+      Cors__AllowedHeaders: "*"
+      Quartz__quartz.scheduler.instanceName: "ballware-local-meta"
+      Quartz__quartz.jobStore.dataSource: "ballware"
+      Quartz__quartz.dataSource.ballware.provider: "Npgsql"
+      Quartz__quartz.dataSource.ballware.connectionStringName: "QuartzConnection"
+      Authorization__Authority: "${KEYCLOAK_REALM_BASE:-http://keycloak:8080/realms/ballware}"
+      Authorization__Audience: "metaApi"
+      Authorization__RequiredScopes: "openid"
+      Authorization__RequireHttpsMetadata: "false"
+      StorageClient__ServiceUrl: "${STORAGE_BASE:-http://storage:5005}"
+      StorageClient__TokenEndpoint: "${KEYCLOAK_REALM_BASE:-http://keycloak:8080/realms/ballware}/protocol/openid-connect/token"
+      StorageClient__ClientId: "storage"
+      StorageClient__ClientSecret: "${STORAGE_CLIENT_SECRET:-ChangeMe2025!}"
+      StorageClient__Scopes: "openid serviceApi offline_access"
+      SchemaClient__ServiceUrl: "${GENERIC_BASE:-http://generic:5002}"
+      SchemaClient__TokenEndpoint: "${KEYCLOAK_REALM_BASE:-http://keycloak:8080/realms/ballware}/protocol/openid-connect/token"
+      SchemaClient__ClientId: "generic"
+      SchemaClient__ClientSecret: "${SCHEMA_CLIENT_SECRET:-ChangeMe2025!}"
+      SchemaClient__Scopes: "openid schemaApi offline_access"
+      Storage__Provider: "postgres"
+      Storage__AutoMigrations: true
+      Storage__AutoSeedAdminTenant: true
+      ConnectionStrings__MetaConnection: "Host=postgres;Port=5432;Database=meta;Username=meta;Password=${DB_META_PASSWORD:-ChangeMe2025!}"  
+      ConnectionStrings__QuartzConnection: "Host=postgres;Port=5432;Database=quartz;Username=quartz;Password=${DB_QUARTZ_PASSWORD:-ChangeMe2025!}"
+      Serilog__MinimumLevel__Override__Microsoft.AspNetCore.Authentication: "Debug"
+      Serilog__MinimumLevel__Override__Microsoft.IdentityModel: "Debug"
+
+  generic:
+    build:
+      context: "https://github.com/ballware/ballware-generic-service.git#main:./src"
+      dockerfile: Ballware.Generic.Service/Dockerfile
+      args:
+        - "GITHUB_USERNAME=${GITHUB_USERNAME}"
+        - "GITHUB_PAT=${GITHUB_PAT}"
+    container_name: generic-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5002:5002"
+    environment:
+      Kestrel__Endpoints__Http__Url: "http://+:5002"
+      Swagger__EnableClient: true
+      Swagger__ClientId: "ballwareweb"
+      Cors__AllowedOrigins: "*"
+      Cors__AllowedMethods: "*"
+      Cors__AllowedHeaders: "*"
+      Quartz__quartz.scheduler.instanceName: "ballware-local-generic"
+      Quartz__quartz.jobStore.dataSource: "ballware"
+      Quartz__quartz.dataSource.ballware.provider: "Npgsql"
+      Quartz__quartz.dataSource.ballware.connectionStringName: "QuartzConnection"
+      Authorization__Authority: "${KEYCLOAK_REALM_BASE:-http://keycloak:8080/realms/ballware}"
+      Authorization__Audience: "metaApi"
+      Authorization__RequiredScopes: "openid"
+      Authorization__RequireHttpsMetadata: "false"
+      StorageClient__ServiceUrl: "${STORAGE_BASE:-http://storage:5005}"
+      StorageClient__TokenEndpoint: "${KEYCLOAK_REALM_BASE:-http://keycloak:8080/realms/ballware}/protocol/openid-connect/token"
+      StorageClient__ClientId: "storage"
+      StorageClient__ClientSecret: "${STORAGE_CLIENT_SECRET:-ChangeMe2025!}"
+      StorageClient__Scopes: "openid serviceApi offline_access"
+      MetaClient__ServiceUrl: "${META_BASE:-http://meta:5001}"
+      MetaClient__TokenEndpoint: "${KEYCLOAK_REALM_BASE:-http://keycloak:8080/realms/ballware}/protocol/openid-connect/token"
+      MetaClient__ClientId: "meta"
+      MetaClient__ClientSecret: "${META_CLIENT_SECRET:-ChangeMe2025!}"
+      MetaClient__Scopes: "openid serviceApi offline_access"
+      MlClient__ServiceUrl: "${ML_BASE:-http://ml:5003}"
+      MLClient__TokenEndpoint: "${KEYCLOAK_REALM_BASE:-http://keycloak:8080/realms/ballware}/protocol/openid-connect/token"
+      MlClient__ClientId: "ml"
+      MlClient__ClientSecret: "${ML_CLIENT_SECRET:-ChangeMe2025!}"
+      MlClient__Scopes: "openid serviceApi offline_access"
+      Storage__AutoMigrations: true      
+      TenantStorage__Provider: "postgres"
+      TenantStorage__ConnectionString: "TenantStorageConnection"
+      PostgresTenantStorage__Enabled: true
+      PostgresTenantStorage__ConnectionString: "TenantStorageMasterConnection"
+      ConnectionStrings__TenantStorageConnection: "Host=postgres;Port=5432;Database=tenant;Username=tenant;Password=${DB_TENANT_PASSWORD:-ChangeMe2025!}"
+      ConnectionStrings__TenantStorageMasterConnection: "Host=postgres;Port=5432;Database=tenant;Username=admin;Password=${DB_ADMIN_PASSWORD:-ChangeMe2025!}"
+      ConnectionStrings__QuartzConnection: "Host=postgres;Port=5432;Database=quartz;Username=quartz;Password=${DB_QUARTZ_PASSWORD:-ChangeMe2025!}"
+
+  ml:
+    build:
+      context: "https://github.com/ballware/ballware-ml-service.git#main:./src"
+      dockerfile: Ballware.Ml.Service/Dockerfile
+      args:
+        - "GITHUB_USERNAME=${GITHUB_USERNAME}"
+        - "GITHUB_PAT=${GITHUB_PAT}"
+    container_name: ml-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5003:5003"
+    environment:
+      Kestrel__Endpoints__Http__Url: "http://+:5003"
+      Swagger__EnableClient: true
+      Swagger__ClientId: "ballwareweb"
+      Cors__AllowedOrigins: "*"
+      Cors__AllowedMethods: "*"
+      Cors__AllowedHeaders: "*"
+      Quartz__quartz.scheduler.instanceName: "ballware-local-ml"
+      Quartz__quartz.jobStore.dataSource: "ballware"
+      Quartz__quartz.dataSource.ballware.provider: "Npgsql"
+      Quartz__quartz.dataSource.ballware.connectionStringName: "QuartzConnection"
+      Authorization__Authority: "${KEYCLOAK_REALM_BASE:-http://keycloak:8080/realms/ballware}"
+      Authorization__Audience: "metaApi"
+      Authorization__RequiredScopes: "openid mlApi"
+      Authorization__RequireHttpsMetadata: "false"
+      StorageClient__ServiceUrl: "${STORAGE_BASE:-http://storage:5005}"
+      StorageClient__TokenEndpoint: "${KEYCLOAK_REALM_BASE:-http://keycloak:8080/realms/ballware}/protocol/openid-connect/token"
+      StorageClient__ClientId: "storage"
+      StorageClient__ClientSecret: "${STORAGE_CLIENT_SECRET:-ChangeMe2025!}"
+      StorageClient__Scopes: "openid serviceApi offline_access"
+      MetaClient__ServiceUrl: "${META_BASE:-http://meta:5001}"
+      MetaClient__TokenEndpoint: "${KEYCLOAK_REALM_BASE:-http://keycloak:8080/realms/ballware}/protocol/openid-connect/token"
+      MetaClient__ClientId: "meta"
+      MetaClient__ClientSecret: "${META_CLIENT_SECRET:-ChangeMe2025!}"
+      MetaClient__Scopes: "openid serviceApi offline_access"
+      GenericClient__ServiceUrl: "${GENERIC_BASE:-http://generic:5002}"
+      GenericClient__TokenEndpoint: "${KEYCLOAK_REALM_BASE:-http://keycloak:8080/realms/ballware}/protocol/openid-connect/token"
+      GenericClient__ClientId: "generic"
+      GenericClient__ClientSecret: "${GENERIC_CLIENT_SECRET:-ChangeMe2025!}"
+      GenericClient__Scopes: "openid serviceApi offline_access"
+      Storage__Provider: "postgres"
+      Storage__AutoMigrations: true      
+      Storage__ConnectionString: "StorageConnection"
+      ConnectionStrings__StorageConnection: "Host=postgres;Port=5432;Database=ml;Username=ml;Password=${DB_ML_PASSWORD:-ChangeMe2025!}"
+      ConnectionStrings__QuartzConnection: "Host=postgres;Port=5432;Database=quartz;Username=quartz;Password=${DB_QUARTZ_PASSWORD:-ChangeMe2025!}"
+
+  reporting:
+    build:
+      context: "https://github.com/ballware/ballware-document-service.git#main:./src"
+      dockerfile: Ballware.Document.Service/Dockerfile
+      args:
+        - "GITHUB_USERNAME=${GITHUB_USERNAME}"
+        - "GITHUB_PAT=${GITHUB_PAT}"
+        - "DEVEXPRESS_NUGETFEED=${DEVEXPRESS_NUGETFEED}"
+    container_name: reporting-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5004:5004"
+    environment:
+      Kestrel__Endpoints__Http__Url: "http://+:5004"
+      Swagger__EnableClient: true
+      Swagger__ClientId: "ballwareweb"
+      Cors__AllowedOrigins: "*"
+      Cors__AllowedMethods: "*"
+      Cors__AllowedHeaders: "*"
+      Quartz__quartz.scheduler.instanceName: "ballware-local-reporting"
+      Quartz__quartz.jobStore.dataSource: "ballware"
+      Quartz__quartz.dataSource.ballware.provider: "Npgsql"
+      Quartz__quartz.dataSource.ballware.connectionStringName: "QuartzConnection"
+      Authorization__Authority: "${KEYCLOAK_REALM_BASE:-http://keycloak:8080/realms/ballware}"
+      Authorization__Issuer: "https://localhost:3002/realms/ballware"
+      Authorization__Audience: "metaApi"
+      Authorization__ClientId: "ballwareweb"
+      Authorization__RequiredScopes: "openid documentApi"
+      Authorization__RequireHttpsMetadata: "false"
+      StorageClient__ServiceUrl: "${STORAGE_BASE:-http://storage:5005}"
+      StorageClient__TokenEndpoint: "${KEYCLOAK_REALM_BASE:-http://keycloak:8080/realms/ballware}/protocol/openid-connect/token"
+      StorageClient__ClientId: "storage"
+      StorageClient__ClientSecret: "${STORAGE_CLIENT_SECRET:-ChangeMe2025!}"
+      StorageClient__Scopes: "openid serviceApi offline_access"
+      MetaClient__ServiceUrl: "${META_BASE:-http://meta:5001}"
+      MetaClient__TokenEndpoint: "${KEYCLOAK_REALM_BASE:-http://keycloak:8080/realms/ballware}/protocol/openid-connect/token"
+      MetaClient__ClientId: "meta"
+      MetaClient__ClientSecret: "${META_CLIENT_SECRET:-ChangeMe2025!}"
+      MetaClient__Scopes: "openid serviceApi offline_access"
+      GenericClient__ServiceUrl: "${GENERIC_BASE:-http://generic:5002}"
+      GenericClient__TokenEndpoint: "${KEYCLOAK_REALM_BASE:-http://keycloak:8080/realms/ballware}/protocol/openid-connect/token"
+      GenericClient__ClientId: "generic"
+      GenericClient__ClientSecret: "${GENERIC_CLIENT_SECRET:-ChangeMe2025!}"
+      GenericClient__Scopes: "openid serviceApi offline_access"
+      MlClient__ServiceUrl: "${ML_BASE:-http://ml:5003}"
+      MlClient__TokenEndpoint: "${KEYCLOAK_REALM_BASE:-http://keycloak:8080/realms/ballware}/protocol/openid-connect/token"
+      MlClient__ClientId: "ml"
+      MlClient__ClientSecret: "${ML_CLIENT_SECRET:-ChangeMe2025!}"
+      MlClient__Scopes: "openid serviceApi offline_access"
+      Storage__Provider: "postgres"
+      Storage__AutoMigrations: true      
+      Storage__ConnectionString: "StorageConnection"
+      ConnectionStrings__StorageConnection: "Host=postgres;Port=5432;Database=reporting;Username=reporting;Password=${DB_REPORTING_PASSWORD:-ChangeMe2025!}"
+      ConnectionStrings__QuartzConnection: "Host=postgres;Port=5432;Database=quartz;Username=quartz;Password=${DB_QUARTZ_PASSWORD:-ChangeMe2025!}"
+      Trigger__Active__0__Name: "WeeklyReportGeneration"
+      Trigger__Active__0__Frequency: "1"
+      Trigger__Active__0__Cron: "0 0 12 ? * 5 *"
+      Mail__FromName: "Ballware Reporting"
+      Mail__FromMail: "noreply@ballware.local"
+      Mail__SmtpHost: "mailpit"
+      Mail__SmtpPort: "8025"
+      Mail__SmtpUser: "fake"
+      Mail__SmtpPassword: "user"
+      Mail__SmtpUseSsl: "false"
+
+  app:
+    build:
+      context: "https://github.com/ballware/ballware-angular.git#main:."
+      dockerfile: apps/webclient/Dockerfile
+    container_name: app
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    environment:   
+      BALLWARE_BASEURL: "http://localhost:3000"
+      BALLWARE_IDENTITYURL: "https://localhost:3002/realms/ballware"
+      BALLWARE_METAURL: "http://localhost:5001/meta"
+      BALLWARE_TENANTURL: "http://localhost:5002/tenant"
+      BALLWARE_GENERICURL: "http://localhost:5002/generic"
+      BALLWARE_MLURL: "http://localhost:5003/ml"
+      BALLWARE_DOCUMENTURL: "http://localhost:5004/document"
+      BALLWARE_DOCUMENT_DESIGNER_URL: "http://localhost:5004/designer"
+      BALLWARE_DOCUMENT_VIEWER_URL: "http://localhost:5004/viewer"
+      BALLWARE_DOCUMENT_SIGNON_URL: "http://localhost:5004/signon"
+      BALLWARE_STORAGEURL: "http://localhost:5005/storage"
+      BALLWARE_CLIENTID: "ballwareweb"
+      BALLWARE_CLIENTSECRET: ""
+      BALLWARE_TENANTCLAIM: "tenant"
+      BALLWARE_USERNAMECLAIM: "preferred_username"
+      BALLWARE_IDENTITYSCOPES: "openid profile offline_access identityApi metaApi storageApi documentApi mlApi"
+      BALLWARE_IDENTITYAUTOREFRESH: 1
+      BALLWARE_ACCOUNTURL: "https://localhost:3002/realms/ballware/account"
+      BALLWARE_GOOGLEKEY: "${BALLWARE_GOOGLEKEY}"
+      BALLWARE_DEVEXTREMEKEY: "${BALLWARE_DEVEXTREMEKEY}"
+
+volumes:
+  pgdata:
+  miniodata:
+  realm-import:
+  keycloak-certs:
