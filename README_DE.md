@@ -403,3 +403,12 @@ Bei Problemen oder Fragen:
 ## 📄 Lizenz
 
 Dieses Projekt steht unter der MIT-Lizenz. Details finden Sie in der [LICENSE](LICENSE) Datei.
+
+## 👤 Autor
+
+**ballware Software & Consulting Frank Ballmeyer**  
+Website: [https://www.ballware.de](https://www.ballware.de)
+
+---
+
+*Copyright (c) 2025 ballware Software & Consulting Frank Ballmeyer*

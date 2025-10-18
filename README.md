@@ -405,4 +405,13 @@ For issues or questions:
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
+## 👤 Author
+
+**ballware Software & Consulting Frank Ballmeyer**  
+Website: [https://www.ballware.de](https://www.ballware.de)
+
+---
+
+*Copyright (c) 2025 ballware Software & Consulting Frank Ballmeyer*
+
 
