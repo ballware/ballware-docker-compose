@@ -20,7 +20,7 @@ services:
 
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./initdb:/docker-entrypoint-initdb.d
+      - ./initdb/postgres:/docker-entrypoint-initdb.d
 
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U admin -d postgres"]
@@ -54,8 +54,8 @@ services:
       minio:
         condition: service_healthy
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin@ballware.local}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-ChangeMe2025!}
       MINIO_INIT_BUCKETS: "ballware-storage"
       MINIO_INIT_VERSIONING: "off"
     entrypoint: >
@@ -79,6 +79,39 @@ services:
     ports:
       - "1025:1025"
       - "8025:8025"
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: mssql
+    restart: unless-stopped
+    ports:
+      - "1433:1433"
+    environment:
+      ACCEPT_EULA: "Y"
+      SA_PASSWORD: ${DB_ADMIN_PASSWORD:-ChangeMe2025!}
+      MSSQL_PID: "Developer"
+    volumes:
+      - mssqldata:/var/opt/mssql
+    healthcheck:
+          # Try legacy sqlcmd first, then sqlcmd v18 with TLS trusted; use container env $SA_PASSWORD
+          test: ["CMD-SHELL", "(/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P \"$$SA_PASSWORD\" -Q \"SELECT 1\" >/dev/null 2>&1) || (/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$SA_PASSWORD\" -C -Q \"SELECT 1\" >/dev/null 2>&1) || exit 1"]
+          interval: 10s
+          timeout: 10s
+          retries: 20
+          start_period: 40s
+
+  mssql-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    depends_on:
+      mssql:
+        condition: service_healthy
+    environment:
+      SA_PASSWORD: ${DB_ADMIN_PASSWORD:-ChangeMe2025!}
+      TENANT_PASSWORD: ${DB_TENANT_PASSWORD:-ChangeMe2025!}
+    volumes:
+      - ./initdb/mssql:/scripts:ro
+    entrypoint: ["/scripts/init-mssql.sh"]
+    restart: "no"
 
   preseed-keycloak:
     image: alpine:3.20
@@ -186,8 +219,8 @@ services:
       Meta__AutoMigrations: true
       Storage__Provider: "minio"
       MinioStorage__Endpoint: "minio:9000"
-      MinioStorage__AccessKey: "${MINIO_ROOT_USER}"
-      MinioStorage__SecretKey: "${MINIO_ROOT_PASSWORD}"
+      MinioStorage__AccessKey: "${MINIO_ROOT_USER:-admin@ballware.local}"
+      MinioStorage__SecretKey: "${MINIO_ROOT_PASSWORD:-ChangeMe2025!}"
       MinioStorage__UseSSL: false
       MinioStorage__BucketName: "ballware-storage"
       ConnectionStrings__MetaStorageConnection: "Host=postgres;Port=5432;Database=storage;Username=storage;Password=${DB_STORAGE_PASSWORD:-ChangeMe2025!}"
@@ -252,6 +285,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      mssql:
+        condition: service_healthy
     ports:
       - "5002:5002"
     environment:
@@ -289,8 +324,11 @@ services:
       TenantStorage__ConnectionString: "TenantStorageConnection"
       PostgresTenantStorage__Enabled: true
       PostgresTenantStorage__ConnectionString: "TenantStorageMasterConnection"
+      SqlServerTenantStorage__Enabled: true
+      SqlServerTenantStorage__ConnectionString: "TenantStorageSqlServerConnection"
       ConnectionStrings__TenantStorageConnection: "Host=postgres;Port=5432;Database=tenant;Username=tenant;Password=${DB_TENANT_PASSWORD:-ChangeMe2025!}"
       ConnectionStrings__TenantStorageMasterConnection: "Host=postgres;Port=5432;Database=tenant;Username=admin;Password=${DB_ADMIN_PASSWORD:-ChangeMe2025!}"
+      ConnectionStrings__TenantStorageSqlServerConnection: "Server=mssql;Database=tenant;User Id=sa;Password=${DB_ADMIN_PASSWORD:-ChangeMe2025!};Encrypt=True;TrustServerCertificate=True"
       ConnectionStrings__QuartzConnection: "Host=postgres;Port=5432;Database=quartz;Username=quartz;Password=${DB_QUARTZ_PASSWORD:-ChangeMe2025!}"
 
   ml:
@@ -444,5 +482,6 @@ services:
 volumes:
   pgdata:
   miniodata:
+  mssqldata:
   realm-import:
   keycloak-certs:
