@@ -20,7 +20,7 @@ services:
 
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./initdb:/docker-entrypoint-initdb.d
+      - ./initdb/postgres:/docker-entrypoint-initdb.d
 
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U admin -d postgres"]
@@ -79,6 +79,38 @@ services:
     ports:
       - "1025:1025"
       - "8025:8025"
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: mssql
+    restart: unless-stopped
+    ports:
+      - "1433:1433"
+    environment:
+      ACCEPT_EULA: "Y"
+      SA_PASSWORD: ${DB_ADMIN_PASSWORD:-ChangeMe2025!}
+      MSSQL_PID: "Developer"
+    volumes:
+      - mssqldata:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P \"${DB_ADMIN_PASSWORD:-ChangeMe2025!}\" -Q \"SELECT 1\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  mssql-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    depends_on:
+      mssql:
+        condition: service_healthy
+    environment:
+      SA_PASSWORD: ${DB_ADMIN_PASSWORD:-ChangeMe2025!}
+      TENANT_PASSWORD: ${DB_TENANT_PASSWORD:-ChangeMe2025!}
+    volumes:
+      - ./initdb/mssql:/scripts:ro
+    entrypoint: ["/scripts/init-mssql.sh"]
+    restart: "no"
 
   preseed-keycloak:
     image: alpine:3.20
@@ -251,6 +283,8 @@ services:
     restart: unless-stopped
     depends_on:
       postgres:
+        condition: service_healthy
+      mssql:
         condition: service_healthy
     ports:
       - "5002:5002"
@@ -444,5 +478,6 @@ services:
 volumes:
   pgdata:
   miniodata:
+  mssqldata:
   realm-import:
   keycloak-certs:
