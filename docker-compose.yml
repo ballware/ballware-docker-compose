@@ -263,7 +263,7 @@ services:
       SchemaClient__ServiceUrl: "${GENERIC_BASE:-http://generic:5002}"
       SchemaClient__TokenEndpoint: "${KEYCLOAK_REALM_BASE:-http://keycloak:8080/realms/ballware}/protocol/openid-connect/token"
       SchemaClient__ClientId: "generic"
-      SchemaClient__ClientSecret: "${SCHEMA_CLIENT_SECRET:-ChangeMe2025!}"
+      SchemaClient__ClientSecret: "${GENERIC_CLIENT_SECRET:-ChangeMe2025!}"
       SchemaClient__Scopes: "openid schemaApi offline_access"
       Storage__Provider: "postgres"
       Storage__AutoMigrations: true
