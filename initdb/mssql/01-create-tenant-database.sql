@@ -1,51 +1,31 @@
--- SQL Server Initialisierungsskript für Tenant-Datenbank
--- Dieses Skript erstellt die Tenant-Datenbank und den entsprechenden Benutzer
+SET NOCOUNT ON;
+
+-- In master ausführen
+USE [master];
 
 -- Erstelle Datenbank 'tenant' falls sie nicht existiert
 IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = N'tenant')
 BEGIN
-    CREATE DATABASE [tenant];
-    PRINT 'Database tenant created.';
+        CREATE DATABASE [tenant];
+        PRINT 'Database tenant created.';
 END
 ELSE
 BEGIN
-    PRINT 'Database tenant already exists.';
+        PRINT 'Database tenant already exists.';
 END
 
--- Wechsle zur tenant Datenbank
-USE [tenant];
-
--- Erstelle Login 'tenant' falls er nicht existiert
-IF NOT EXISTS (SELECT name FROM sys.server_principals WHERE name = N'tenant')
+-- Warte, bis die Datenbank ONLINE ist
+DECLARE @retry INT = 60;
+WHILE DB_ID(N'tenant') IS NULL OR EXISTS (
+    SELECT 1 FROM sys.databases WHERE name = N'tenant' AND state <> 0 -- 0 = ONLINE
+)
 BEGIN
-    CREATE LOGIN [tenant] WITH PASSWORD = N'$(TENANT_PASSWORD)';
-    PRINT 'Login tenant created.';
-END
-ELSE
-BEGIN
-    ALTER LOGIN [tenant] WITH PASSWORD = N'$(TENANT_PASSWORD)';
-    PRINT 'Login tenant password updated.';
-END
-
--- Erstelle Datenbankbenutzer 'tenant' falls er nicht existiert
-IF NOT EXISTS (SELECT name FROM sys.database_principals WHERE name = N'tenant')
-BEGIN
-    CREATE USER [tenant] FOR LOGIN [tenant];
-    PRINT 'User tenant created.';
+    WAITFOR DELAY '00:00:01';
+    SET @retry -= 1;
+    IF @retry = 0 
+    BEGIN
+        THROW 51000, 'Timeout waiting for tenant DB to be ONLINE', 1;
+    END
 END
 
--- Füge Benutzer 'tenant' zur db_owner Rolle hinzu falls noch nicht Mitglied
-IF NOT EXISTS (SELECT 1 FROM sys.database_role_members rm 
-              JOIN sys.database_principals dp ON rm.member_principal_id = dp.principal_id
-              JOIN sys.database_principals dp2 ON rm.role_principal_id = dp2.principal_id
-              WHERE dp.name = N'tenant' AND dp2.name = N'db_owner')
-BEGIN
-    ALTER ROLE db_owner ADD MEMBER [tenant];
-    PRINT 'User tenant added to db_owner role.';
-END
-ELSE
-BEGIN
-    PRINT 'User tenant is already a member of db_owner role.';
-END
-
-PRINT 'Tenant database initialization completed.';
+PRINT 'Tenant database created and online.';
